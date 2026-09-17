@@ -16,8 +16,12 @@ from factory.storage import get_storage
 
 def apply_silver(df: Any, silver_cfg: dict) -> Any:
     """Aplica as transformacoes Silver declaradas no YAML, nesta ordem:
-    select -> rename -> casts -> where -> drop.
+    explode -> select -> rename -> casts -> where -> dedup -> drop.
     """
+    explode_cfg = silver_cfg.get("explode")
+    if explode_cfg:
+        # Ex.: explode: {column: data, alias: media} -> uma linha por item do array.
+        df = df.withColumn(explode_cfg["alias"], F.explode(F.col(explode_cfg["column"])))
     if "select" in silver_cfg:
         df = df.selectExpr(*silver_cfg["select"])
     for old, new in silver_cfg.get("rename", {}).items():
@@ -26,6 +30,9 @@ def apply_silver(df: Any, silver_cfg: dict) -> Any:
         df = df.withColumn(col, F.col(col).cast(ctype))
     if "where" in silver_cfg:
         df = df.filter(silver_cfg["where"])
+    dedup_cols = silver_cfg.get("dedup")
+    if dedup_cols:
+        df = df.dropDuplicates(dedup_cols)
     for col in silver_cfg.get("drop", []):
         if col in df.columns:
             df = df.drop(col)

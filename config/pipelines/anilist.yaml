@@ -1,0 +1,265 @@
+﻿# Pipeline AniList -> caso Anime & Manga
+#
+# Dados crus: paginas JSON da AniList GraphQL (plano B do case; Jikan estava
+# fora do ar). Cada arquivo year_*_page_*.json e uma pagina com:
+#   {fonte, tipo, ano_fatiamento, pagina, coletado_utc, pageInfo, data: [...]}
+#
+# Bronze: paginas como vieram (array `data` preservado). O glob year_*.json
+# exclui o snapshot_meta.json (metadata da coleta, outro schema).
+#
+# Silver: explode da pagina em linhas de obra + achatamento dos campos
+# aninhados (title, startDate/endDate) + tipagem + dedup por id.
+# Filtro de conteudo adulto: proxy do case = genero "Hentai" (decisao da
+# Dani em 2026-09-02, documentada em notebooks/02_processa_raw.py).
+#
+# Gold: agregados que alimentam as hipoteses H1-H4 do case:
+#   genre_stats / genre_pair_stats (H1), decade_stats (H2/H4),
+#   format_stats e episode_bucket_stats (H3).
+
+pipeline: anilist
+description: "AniList -> Anime & Manga: obras com agregados por genero, decada, formato, pares de generos e buckets de episodios"
+source_base: "F:/portfolio/projects/anime-manga/data/raw"
+
+spark:
+  spark.driver.memory: "6g"
+  spark.sql.shuffle.partitions: "12"
+
+quality:
+  abort_on_fail: true
+
+tables:
+  - name: anime
+    file: anilist/anime/year_*.json
+    format: json
+    options:
+      mergeSchema: "true"
+    silver:
+      explode:
+        column: data
+        alias: media
+      select:
+        - "media.id AS id"
+        - "media.idMal AS id_mal"
+        - "media.format AS format"
+        - "media.status AS status"
+        - "media.source AS source"
+        - "media.countryOfOrigin AS country"
+        - "media.season AS season"
+        - "media.seasonYear AS season_year"
+        - "media.title.romaji AS title_romaji"
+        - "media.title.english AS title_english"
+        - "media.title.native AS title_native"
+        - "media.startDate.year AS start_year"
+        - "media.startDate.month AS start_month"
+        - "media.endDate.year AS end_year"
+        - "media.episodes AS episodes"
+        - "media.duration AS duration"
+        - "media.averageScore AS average_score"
+        - "media.popularity AS popularity"
+        - "media.favourites AS favourites"
+        - "media.genres AS genres"
+        - "coletado_utc AS coletado_utc"
+      casts:
+        id: long
+        id_mal: long
+        start_year: int
+        start_month: int
+        end_year: int
+        season_year: int
+        episodes: int
+        average_score: int
+        popularity: int
+        favourites: int
+      where: "NOT array_contains(COALESCE(genres, array()), 'Hentai') AND id IS NOT NULL AND start_year IS NOT NULL"
+      dedup: [id]
+  - name: manga
+    file: anilist/manga/year_*.json
+    format: json
+    options:
+      mergeSchema: "true"
+    silver:
+      explode:
+        column: data
+        alias: media
+      select:
+        - "media.id AS id"
+        - "media.idMal AS id_mal"
+        - "media.format AS format"
+        - "media.status AS status"
+        - "media.source AS source"
+        - "media.countryOfOrigin AS country"
+        - "media.title.romaji AS title_romaji"
+        - "media.title.english AS title_english"
+        - "media.title.native AS title_native"
+        - "media.startDate.year AS start_year"
+        - "media.startDate.month AS start_month"
+        - "media.endDate.year AS end_year"
+        - "media.chapters AS chapters"
+        - "media.volumes AS volumes"
+        - "media.averageScore AS average_score"
+        - "media.popularity AS popularity"
+        - "media.favourites AS favourites"
+        - "media.genres AS genres"
+        - "coletado_utc AS coletado_utc"
+      casts:
+        id: long
+        id_mal: long
+        start_year: int
+        start_month: int
+        end_year: int
+        chapters: int
+        volumes: int
+        average_score: int
+        popularity: int
+        favourites: int
+      where: "NOT array_contains(COALESCE(genres, array()), 'Hentai') AND id IS NOT NULL AND start_year IS NOT NULL"
+      dedup: [id]
+
+checks:
+  - layer: bronze
+    table: anime
+    checks:
+      - {type: not_empty}
+  - layer: bronze
+    table: manga
+    checks:
+      - {type: not_empty}
+  - layer: silver
+    table: anime
+    checks:
+      - {type: not_null, column: id}
+      - {type: unique, columns: [id]}
+      - {type: range, column: average_score, min: 0, max: 100}
+      - {type: range, column: start_year, min: 1900, max: 2030}
+      - {type: range, column: popularity, min: 0, max: 10000000}
+  - layer: silver
+    table: manga
+    checks:
+      - {type: not_null, column: id}
+      - {type: unique, columns: [id]}
+      - {type: range, column: average_score, min: 0, max: 100}
+      - {type: range, column: start_year, min: 1900, max: 2030}
+      - {type: range, column: popularity, min: 0, max: 10000000}
+  - layer: gold
+    table: genre_stats
+    checks:
+      - {type: not_empty}
+  - layer: gold
+    table: decade_stats
+    checks:
+      - {type: not_empty}
+
+gold:
+  - name: genre_stats
+    sql: |
+      WITH obras AS (
+        SELECT 'anime' AS tipo, id, average_score, popularity, explode(genres) AS genero
+        FROM anime
+        UNION ALL
+        SELECT 'manga' AS tipo, id, average_score, popularity, explode(genres) AS genero
+        FROM manga
+      )
+      SELECT tipo,
+             genero,
+             COUNT(*)                                AS obras,
+             ROUND(AVG(average_score), 2)            AS avg_score,
+             ROUND(percentile_approx(average_score, 0.5), 2) AS median_score,
+             ROUND(percentile_approx(popularity, 0.5), 1)    AS median_popularity,
+             COUNT(CASE WHEN popularity >= 1000 THEN 1 END)  AS obras_confiaveis
+      FROM obras
+      GROUP BY tipo, genero
+      ORDER BY tipo, obras DESC
+  - name: genre_pair_stats
+    sql: |
+      WITH obras AS (
+        SELECT 'anime' AS tipo, id, average_score, genres
+        FROM anime
+        WHERE size(genres) >= 2
+        UNION ALL
+        SELECT 'manga' AS tipo, id, average_score, genres
+        FROM manga
+        WHERE size(genres) >= 2
+      ),
+      pares AS (
+        SELECT tipo, id, average_score, g1 AS genero_a, g2 AS genero_b
+        FROM obras
+        LATERAL VIEW explode(genres) AS g1
+        LATERAL VIEW explode(genres) AS g2
+        WHERE g1 < g2
+      )
+      SELECT tipo,
+             genero_a,
+             genero_b,
+             COUNT(*)                                AS obras,
+             ROUND(percentile_approx(average_score, 0.5), 2) AS median_score
+      FROM pares
+      GROUP BY tipo, genero_a, genero_b
+      ORDER BY tipo, obras DESC
+  - name: decade_stats
+    sql: |
+      WITH obras AS (
+        SELECT 'anime' AS tipo, CAST(FLOOR(start_year / 10) * 10 AS INT) AS decada,
+               average_score, popularity
+        FROM anime
+        UNION ALL
+        SELECT 'manga' AS tipo, CAST(FLOOR(start_year / 10) * 10 AS INT) AS decada,
+               average_score, popularity
+        FROM manga
+      )
+      SELECT tipo,
+             decada,
+             COUNT(*)                                AS obras,
+             ROUND(AVG(average_score), 2)            AS avg_score,
+             ROUND(percentile_approx(average_score, 0.5), 2) AS median_score,
+             ROUND(percentile_approx(popularity, 0.5), 1)    AS median_popularity
+      FROM obras
+      GROUP BY tipo, decada
+      ORDER BY tipo, decada
+  - name: format_stats
+    sql: |
+      WITH obras AS (
+        SELECT 'anime' AS tipo, format, average_score
+        FROM anime
+        UNION ALL
+        SELECT 'manga' AS tipo, format, average_score
+        FROM manga
+      )
+      SELECT tipo,
+             format,
+             COUNT(*)                                AS obras,
+             ROUND(AVG(average_score), 2)            AS avg_score,
+             ROUND(percentile_approx(average_score, 0.5), 2) AS median_score
+      FROM obras
+      GROUP BY tipo, format
+      ORDER BY tipo, obras DESC
+  - name: episode_bucket_stats
+    sql: |
+      WITH b AS (
+        SELECT id,
+               average_score,
+               episodes,
+               CASE
+                 WHEN episodes IS NULL THEN 'sem_info'
+                 WHEN episodes = 1 THEN '1'
+                 WHEN episodes BETWEEN 2 AND 12 THEN '2-12'
+                 WHEN episodes BETWEEN 13 AND 24 THEN '13-24'
+                 WHEN episodes BETWEEN 25 AND 52 THEN '25-52'
+                 ELSE '53+'
+               END AS bucket
+        FROM anime
+      )
+      SELECT bucket,
+             COUNT(*)                                AS obras,
+             ROUND(AVG(average_score), 2)            AS avg_score,
+             ROUND(percentile_approx(average_score, 0.5), 2) AS median_score
+      FROM b
+      GROUP BY bucket
+      ORDER BY CASE bucket
+                 WHEN '1' THEN 1
+                 WHEN '2-12' THEN 2
+                 WHEN '13-24' THEN 3
+                 WHEN '25-52' THEN 4
+                 WHEN '53+' THEN 5
+                 ELSE 6
+               END
+

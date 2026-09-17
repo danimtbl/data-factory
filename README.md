@@ -26,6 +26,7 @@ powershell -ExecutionPolicy Bypass -File scripts\setup_hadoop.ps1
 # 3. rodar um pipeline
 .\.venv\Scripts\python.exe -m factory list
 .\.venv\Scripts\python.exe -m factory run imdb
+.\.venv\Scripts\python.exe -m factory run anilist
 ```
 
 Cada execução grava os dados em `lake/<camada>/<pipeline>/` e o relatório em
@@ -45,12 +46,13 @@ CONTEXTO.md        fonte de verdade do projeto (decisoes, roadmap, estado)
 ## Pipelines
 
 - `imdb` — caso Supernatural: episódios e notas da série no IMDb, com agregados por temporada.
-- `anilist` — caso Anime & Manga (fase 1).
+- `anilist` — caso Anime & Manga: obras (anime e manga) da AniList GraphQL, com agregados
+  por gênero, pares de gêneros, década, formato e buckets de episódios (H1–H4 do case).
 
 ## Roadmap
 
 - [x] Fase 0 — núcleo da fábrica + pipeline IMDb (Supernatural) fim-a-fim
-- [ ] Fase 1 — pipeline AniList (anime-manga): segundo domínio na mesma fábrica
+- [x] Fase 1 — pipeline AniList (anime-manga): segundo domínio na mesma fábrica
 - [ ] Fase 2 — MinIO (S3 local) via camada de storage + Dagster (assets, lineage, schedules)
 - [ ] Fase 3 — extração streaming para as tabelas grandes do IMDb (name.basics, title.principals)
 - [ ] Fase 4 — terceiro domínio (INEP/Censo Escolar → case Educação em Foco)

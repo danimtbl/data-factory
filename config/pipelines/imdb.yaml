@@ -1,0 +1,132 @@
+# Pipeline IMDb -> caso Supernatural
+#
+# Dados publicos do IMDb (https://datasets.imdbws.com/), extraidos de forma
+# seletiva para o dominio do case (a serie Supernatural, tconst tt0460681).
+#
+# Estrategia de extracao seletiva (EL, nao T):
+# - title.episode: filtra so os episodios da serie (parentTconst = tt0460681);
+# - title.basics / title.crew: semi-join com os episodios extraidos;
+# - title.ratings: tabela pequena, entra completa.
+#
+# Os arquivos .tsv.gz nao permitem pushdown de filtro (gzip nao e divisivel),
+# entao a leitura varre o arquivo e o filtro e aplicado logo em seguida.
+# As tabelas grandes (name.basics, title.principals) ficam para a fase de
+# extracao streaming (scripts/extract), quando a Gold precisar de elenco/nomes.
+
+pipeline: imdb
+description: "IMDb -> Supernatural: episodios, notas e agregados por temporada"
+source_base: "F:/portfolio/projects/supernatural/data/raw"
+
+spark:
+  spark.driver.memory: "6g"
+  spark.sql.shuffle.partitions: "12"
+
+quality:
+  abort_on_fail: true
+
+tables:
+  - name: episode
+    file: title.episode.tsv.gz
+    format: tsv_gz
+    filter: "parentTconst = 'tt0460681'"
+    silver:
+      rename:
+        tconst: episode_id
+        parentTconst: series_id
+        seasonNumber: season
+        episodeNumber: episode
+      casts:
+        season: int
+        episode: int
+      drop: [_source_file]
+  - name: ratings
+    file: title.ratings.tsv.gz
+    format: tsv_gz
+    silver:
+      casts:
+        averageRating: double
+        numVotes: int
+      drop: [_source_file]
+  - name: basics
+    file: title.basics.tsv.gz
+    format: tsv_gz
+    join_filter:
+      table: episode
+      column: tconst
+    silver:
+      rename:
+        tconst: title_id
+      drop: [_source_file]
+  - name: crew
+    file: title.crew.tsv.gz
+    format: tsv_gz
+    join_filter:
+      table: episode
+      column: tconst
+    silver:
+      rename:
+        tconst: episode_id
+      drop: [_source_file]
+
+checks:
+  - layer: bronze
+    table: episode
+    checks:
+      - {type: not_empty}
+  - layer: silver
+    table: episode
+    checks:
+      - {type: not_null, column: episode_id}
+      - {type: not_null, column: season}
+      - {type: not_null, column: episode}
+      - {type: unique, columns: [episode_id]}
+      - {type: range, column: season, min: 1, max: 50}
+      - {type: range, column: episode, min: 1, max: 100}
+  - layer: silver
+    table: ratings
+    checks:
+      - {type: not_null, column: tconst}
+      - {type: unique, columns: [tconst]}
+      - {type: range, column: averageRating, min: 0, max: 10}
+  - layer: silver
+    table: basics
+    checks:
+      - {type: not_null, column: title_id}
+  - layer: silver
+    table: crew
+    checks:
+      - {type: not_null, column: episode_id}
+  - layer: gold
+    table: season_summary
+    checks:
+      - {type: not_empty}
+      - {type: not_null, column: season}
+
+gold:
+  - name: episode_ratings
+    sql: |
+      SELECT e.episode_id,
+             e.season,
+             e.episode,
+             b.primaryTitle AS title,
+             r.averageRating,
+             r.numVotes
+      FROM episode e
+      JOIN ratings r ON e.episode_id = r.tconst
+      LEFT JOIN basics b ON e.episode_id = b.title_id
+      ORDER BY e.season, e.episode
+  - name: season_summary
+    sql: |
+      WITH er AS (
+        SELECT e.season, r.averageRating, r.numVotes
+        FROM episode e
+        JOIN ratings r ON e.episode_id = r.tconst
+      )
+      SELECT season,
+             COUNT(*)                         AS episodes,
+             ROUND(AVG(averageRating), 3)     AS avg_rating,
+             ROUND(percentile_approx(averageRating, 0.5), 3) AS median_rating,
+             SUM(numVotes)                    AS total_votes
+      FROM er
+      GROUP BY season
+      ORDER BY season

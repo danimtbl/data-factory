@@ -1,0 +1,19 @@
+# Python
+__pycache__/
+*.pyc
+.venv/
+.ipynb_checkpoints/
+
+# Ambiente
+.env
+
+# Data lake (dados nao sao versionados; o codigo gera tudo)
+lake/
+spark-warehouse/
+metastore_db/
+derby.log
+
+# Logs e temporarios
+*.log
+*-log.txt
+.sparkStaging/
